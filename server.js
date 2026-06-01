@@ -1,74 +1,69 @@
-const { Server } = require('socket.io');
-const { spawn } = require('child_process');
-const path = require('path');
+const WebSocket = require('ws');
 
-// ---------- Configuration ----------
-const PORT = 5002;
+const PORT = process.env.PORT || 8080;
 
-// Use the Python launcher (usually available)
-const PYTHON_CMD = 'py';
-
-// Full path to your mt5_stream.py inside PropFirm-Pro/mt5_bridge
-const SCRIPT_PATH = path.join(__dirname, '..', 'mt5_bridge', 'mt5_stream.py');
-
-// ---------- Socket.IO server ----------
-const io = new Server(PORT, {
-    cors: {
-        origin: "http://localhost:3000",
-        methods: ["GET", "POST"]
-    }
-});
-
-console.log(`🚀 WebSocket server running on http://localhost:${PORT}`);
-
-// ---------- Spawn Python process ----------
-let pythonProcess = null;
-
-function startPythonProcess() {
-    if (pythonProcess) {
-        pythonProcess.kill();
-    }
-
-    console.log(`Starting Python script: ${SCRIPT_PATH}`);
-    pythonProcess = spawn(PYTHON_CMD, [SCRIPT_PATH], {
-        cwd: path.dirname(SCRIPT_PATH)
-    });
-
-    pythonProcess.stdout.on('data', (data) => {
-        const lines = data.toString().split('\n');
-        for (const line of lines) {
-            if (line.trim()) {
-                try {
-                    const state = JSON.parse(line);
-                    io.emit('account_update', state);
-                } catch (err) {
-                    console.error('JSON parse error:', err.message);
-                }
-            }
-        }
-    });
-
-    pythonProcess.stderr.on('data', (data) => {
-        console.error(`[Python stderr]: ${data}`);
-    });
-
-    pythonProcess.on('close', (code) => {
-        console.log(`Python process exited with code ${code}. Restarting in 2 seconds...`);
-        setTimeout(startPythonProcess, 2000);
-    });
+let server;
+try {
+  server = new WebSocket.Server({ port: PORT });
+  console.log(`✅ WebSocket server running on port ${PORT}`);
+} catch (err) {
+  console.error('❌ Failed to start server:', err);
+  process.exit(1);
 }
 
-startPythonProcess();
+const clients = new Set();
 
-io.on('connection', (socket) => {
-    console.log(`✅ Client connected: ${socket.id}`);
-    socket.on('disconnect', () => {
-        console.log(`❌ Client disconnected: ${socket.id}`);
-    });
+server.on('connection', (ws, req) => {
+  console.log(`➕ New client connected from ${req.socket.remoteAddress}`);
+  clients.add(ws);
+
+  ws.on('message', (message) => {
+    try {
+      const data = JSON.parse(message);
+      console.log('📨 Received:', data);
+      for (const client of clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify(data));
+        }
+      }
+    } catch (err) {
+      console.error('Invalid message:', message);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('➖ Client disconnected');
+    clients.delete(ws);
+  });
+
+  ws.on('error', (err) => {
+    console.error('WebSocket client error:', err);
+  });
 });
 
-process.on('SIGINT', () => {
-    console.log('\nShutting down...');
-    if (pythonProcess) pythonProcess.kill();
-    process.exit();
+server.on('error', (err) => {
+  console.error('WebSocket server error:', err);
 });
+
+// Dummy data every 10 seconds
+setInterval(() => {
+  if (clients.size === 0) return;
+  const dummyData = {
+    type: 'account_update',
+    payload: {
+      balance: 11149.87 + (Math.random() * 10 - 5),
+      equity: 11149.87 + (Math.random() * 10 - 5),
+      profit: (Math.random() * 20 - 10).toFixed(2),
+      margin: 0,
+      free_margin: 11149.87,
+      timestamp: new Date().toISOString()
+    }
+  };
+  const msg = JSON.stringify(dummyData);
+  for (const client of clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(msg);
+    }
+  }
+  console.log('📤 Sent dummy update to', clients.size, 'clients');
+}, 10000);
